@@ -20,6 +20,7 @@ export interface ProjectOptions {
   entry: string;
   engine: string;
   log?: (message: string) => void;
+  publicDir?: string;
 }
 
 interface Current {
@@ -171,7 +172,7 @@ export class Project extends EventEmitter<ProjectEvents> {
 
   /** A worker for `role` over the bundle `bundleFile`. */
   spawn(role: WorkerRole, bundleFile: string | null, cancel?: SharedArrayBuffer): WorkerClient {
-    return new WorkerClient({ role, engine: this.options.engine, options: { entry: this.options.entry, bundleFile }, cancel });
+    return new WorkerClient({ role, engine: this.options.engine, options: { entry: this.options.entry, bundleFile, ...(this.options.publicDir === undefined ? {} : { publicDir: this.options.publicDir }) }, cancel });
   }
 
   private apply(build: ProjectBuild, scene: boolean): void {

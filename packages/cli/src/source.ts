@@ -72,6 +72,7 @@ export interface WorkerSpec {
   comp: string;
   props?: string;
   bundleFile: string;
+  publicDir?: string;
 }
 
 export interface OpenOptions {
@@ -87,6 +88,8 @@ export interface OpenOptions {
   progress?: (message: string) => void;
   /** False in a render worker: the main thread did the pre-download step. */
   prefetch?: boolean;
+  /** Directory `staticFile()` reads from (default: `public/` beside the entry, else beside the nearest package.json). */
+  publicDir?: string;
 }
 
 export function isSceneFile(entry: string): boolean {
@@ -125,7 +128,12 @@ function requireEntry(entry: string): string {
  * Where `staticFile` reads from: `public/` beside the entry, or else `public/` beside the nearest package.json (where
  * Remotion keeps it, with the entry in `src/`). Beside the entry when neither exists.
  */
-export function publicDirOf(entry: string): string {
+export function publicDirOf(entry: string, override?: string): string {
+  if (override !== undefined) {
+    const absolute = resolve(override);
+    if (!existsSync(absolute)) throw new CliError('PUBLIC_DIR_NOT_FOUND', `no such directory: ${override}`);
+    return absolute;
+  }
   const beside = join(dirname(entry), 'public');
   if (existsSync(beside)) return beside;
   for (let dir = dirname(entry); ; dir = dirname(dir)) {
@@ -155,6 +163,7 @@ async function loadProject(
   bundleFile?: string,
   unsupported?: UnsupportedImport[],
   prefetch: { offline?: boolean; progress?: (message: string) => void } | null = null,
+  publicDirOverride?: string,
 ): Promise<{ mod: ProjectModule; file: string }> {
   // What the project loads from the web is downloaded before it is read, so frame 0 starts offline.
   if (prefetch !== null) await prefetchBeforePlan(entry, prefetch);
@@ -168,7 +177,7 @@ async function loadProject(
   if (isHyperframesEntry(entry)) installRemotePictures();
   // Set before the import: a staticFile() call made while the project loads (a font, a module-level constant) runs
   // before setPublicDir below can.
-  const publicDir = publicDirOf(entry);
+  const publicDir = publicDirOf(entry, publicDirOverride);
   process.env.KINETOGRAPH_PUBLIC_DIR = publicDir;
   process.env.KINETOGRAPH_BASE_DIR = dirname(entry);
   let mod: ProjectModule;
@@ -200,10 +209,10 @@ async function loadProject(
 }
 
 /** The compositions a project (or a scene file, which is one) offers. */
-export async function listCompositions(entry: string, options: { bundleFile?: string; offline?: boolean; progress?: (message: string) => void } = {}): Promise<CompositionInfo[]> {
+export async function listCompositions(entry: string, options: { bundleFile?: string; offline?: boolean; progress?: (message: string) => void; publicDir?: string } = {}): Promise<CompositionInfo[]> {
   const absolute = requireEntry(entry);
   if (isSceneFile(absolute)) return [sceneComposition(absolute, readFileSync(absolute, 'utf8'))];
-  return (await loadProject(absolute, options.bundleFile, undefined, options)).mod.getCompositions();
+  return (await loadProject(absolute, options.bundleFile, undefined, options, options.publicDir)).mod.getCompositions();
 }
 
 function sceneComposition(file: string, text: string): CompositionInfo {
@@ -247,7 +256,7 @@ export async function openSource(entry: string, options: OpenOptions = {}): Prom
   }
 
   const inputProps = parseProps(options.props);
-  const { mod, file: bundleFile } = await loadProject(absolute, options.bundleFile, options.unsupportedImports, options.prefetch === false ? null : options);
+  const { mod, file: bundleFile } = await loadProject(absolute, options.bundleFile, options.unsupportedImports, options.prefetch === false ? null : options, options.publicDir);
   const compositions = mod.getCompositions();
   if (compositions.length === 0) {
     throw new CliError('NO_COMPOSITIONS', `${entry} registered no compositions: call registerRoot() with a root that renders <Composition>`);
@@ -281,7 +290,7 @@ export async function openSource(entry: string, options: OpenOptions = {}): Prom
       const unsupported = [...result.unsupported, ...notes(sceneJson)];
       return { sceneJson, audio: result.audio, sequences: result.sequences, ...(result.names !== undefined ? { names: result.names } : {}), unsupported, jsMs: rendered - started, stringifyMs: nowMs() - rendered };
     },
-    worker: { entry: absolute, comp: composition.id, props: options.props, bundleFile },
+    worker: { entry: absolute, comp: composition.id, props: options.props, bundleFile, ...(options.publicDir !== undefined ? { publicDir: options.publicDir } : {}) },
     notes: () => mod.stylesheetNotes(),
     artifacts: () => mod.getArtifacts(),
     clearArtifacts: () => mod.clearArtifacts(),

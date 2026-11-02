@@ -1,15 +1,15 @@
 import { effectCatalog } from '@kinetographdev/scene';
+import { PROJECT_OPTIONS } from '../args.js';
 import { listCompositions } from '../source.js';
 import { ENTRY, type Command } from './types.js';
-
 export const compositions: Command = {
   name: 'compositions',
   summary: 'List the compositions of a project',
   project: false,
   positionals: [ENTRY],
-  options: [],
+  options: [...PROJECT_OPTIONS],
   async run(args) {
-    const list = await listCompositions(String(args.positionals.entry));
+    const list = await listCompositions(String(args.positionals.entry), { ...(args.options['public-dir'] === undefined ? {} : { publicDir: args.options['public-dir'] as string }) });
     const text = list
       .map((c) => `${c.id}  ${c.width}x${c.height}  ${c.fps} fps  ${c.durationInFrames} frames (${(c.durationInFrames / c.fps).toFixed(2)} s)`)
       .join('\n');

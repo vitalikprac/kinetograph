@@ -15,6 +15,7 @@ export interface StudioModule {
     agent?: string;
     allowRemoteAgent?: boolean;
     log?: (message: string) => void;
+    publicDir?: string;
   }): Promise<{ url: string; close(): Promise<void> }>;
 }
 
@@ -78,6 +79,7 @@ export const studio: Command = {
     { name: 'allow-remote-agent', type: 'boolean', description: 'Keep the coding agent on when --host lets other computers reach the studio (off by default then)' },
     { name: 'props', type: 'string', description: 'Input props as a JSON object, merged over each composition\'s defaultProps' },
     { name: 'offline', type: 'boolean', description: 'Never download what a HyperFrames project loads from the web (it must already be cached)' },
+    { name: 'public-dir', type: 'string', description: 'Directory staticFile() reads from (default: public/ beside the entry, else beside the nearest package.json)' },
   ],
   async run(args, context) {
     // Everything that can be wrong with the arguments is reported before anything starts.
@@ -106,6 +108,7 @@ export const studio: Command = {
       agent,
       allowRemoteAgent: args.options['allow-remote-agent'] === true,
       log: context.progress,
+      ...(args.options['public-dir'] === undefined ? {} : { publicDir: args.options['public-dir'] as string }),
     });
     context.announce({ url: server.url }, `kinetograph studio: ${server.url} (Ctrl-C to stop)`);
     await hooks.waitForStop();

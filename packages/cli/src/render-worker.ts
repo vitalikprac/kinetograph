@@ -49,7 +49,7 @@ setPreferredEffectBackend(preferredEffectBackend);
 process.env.NODE_ENV = devReact ? 'development' : 'production';
 
 try {
-  const source = await openSource(spec.entry, { comp: spec.comp, props: spec.props, bundleFile: spec.bundleFile, prefetch: false });
+  const source = await openSource(spec.entry, { comp: spec.comp, props: spec.props, bundleFile: spec.bundleFile, prefetch: false, ...(spec.publicDir === undefined ? {} : { publicDir: spec.publicDir }) });
   source.clearArtifacts?.();
   const renderer = new (native().Renderer)();
   const log = profiling ? new ProfileLog(false) : undefined;

@@ -37,6 +37,8 @@ export interface StudioOptions {
   catalog?: { url?: string; cacheFile?: string; offline?: boolean; fetch?: typeof fetch; timeoutMs?: number; bundledFile?: string };
   /** Receives one line for each build, build failure and warning. */
   log?: (message: string) => void;
+  /** Directory `staticFile()` reads from (default: `public/` beside the entry, else beside the nearest package.json). */
+  publicDir?: string;
 }
 
 export interface StudioServer {

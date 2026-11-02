@@ -133,7 +133,7 @@ export async function startStudio(options: StudioOptions): Promise<StudioServer>
   const log = options.log ?? (() => undefined);
   const loopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
 
-  const project = new Project({ entry, engine: options.engine ?? REAL_ENGINE_FILE, log });
+  const project = new Project({ entry, engine: options.engine ?? REAL_ENGINE_FILE, log, ...(options.publicDir === undefined ? {} : { publicDir: options.publicDir }) });
   const queue = new RenderQueue({ spawn: (cancel) => project.spawn('render', project.bundleFile, cancel) });
   const sockets = new Set<WebSocket>();
   const frameState = new WeakMap<WebSocket, { busy: boolean; queued?: FrameRequest }>();

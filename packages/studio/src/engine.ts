@@ -12,6 +12,8 @@ export interface EngineOptions {
   entry: string;
   /** The built bundle of the project; null for a `.json` scene. */
   bundleFile: string | null;
+  /** Directory `staticFile()` reads from (default: `public/` beside the entry, else beside the nearest package.json). */
+  publicDir?: string;
 }
 
 /** One frame after the JS stage: what the preview, `inspect` and the timeline are made from. */

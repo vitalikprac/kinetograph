@@ -32,6 +32,7 @@ export const PROJECT_OPTIONS: OptionSpec[] = [
   { name: 'comp', type: 'string', description: 'Composition id (default: the first composition)' },
   { name: 'props', type: 'string', description: 'Input props: a JSON object, or the path of a JSON file' },
   { name: 'offline', type: 'boolean', description: 'Never download: remote scripts, modules, pictures and media must already be cached (a missing one is an error, as before the pre-download step)' },
+  { name: 'public-dir', type: 'string', description: 'Directory staticFile() reads from (default: public/ beside the entry, else beside the nearest package.json)' },
 ];
 
 export const JSON_OPTION: OptionSpec = {

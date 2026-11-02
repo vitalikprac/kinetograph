@@ -61,7 +61,7 @@ export function nameLayers(layers: InspectLayer[], names: Record<string, LayerNa
   });
 }
 
-export function createEngine({ entry, bundleFile }: EngineOptions): Engine {
+export function createEngine({ entry, bundleFile, publicDir }: EngineOptions): Engine {
   const sources = new Map<string, Promise<Source>>();
   let renderer: InstanceType<ReturnType<typeof native>['Renderer']> | undefined;
   const gpu = () => (renderer ??= new (native().Renderer)());
@@ -74,7 +74,7 @@ export function createEngine({ entry, bundleFile }: EngineOptions): Engine {
       // Most recently used last.
       sources.delete(key);
     } else {
-      source = openSource(entry, { comp, props: JSON.stringify(props), bundleFile: bundleFile ?? undefined });
+      source = openSource(entry, { comp, props: JSON.stringify(props), bundleFile: bundleFile ?? undefined, ...(publicDir === undefined ? {} : { publicDir }) });
       source.catch(() => sources.delete(key));
     }
     sources.set(key, source);
@@ -87,7 +87,7 @@ export function createEngine({ entry, bundleFile }: EngineOptions): Engine {
   }
 
   return {
-    compositions: () => listCompositions(entry, { bundleFile: bundleFile ?? undefined }),
+    compositions: () => listCompositions(entry, { bundleFile: bundleFile ?? undefined, ...(publicDir === undefined ? {} : { publicDir }) }),
 
     async plan({ comp, props, range }) {
       const { composition } = await sourceFor(comp, props);
@@ -147,7 +147,7 @@ export function createEngine({ entry, bundleFile }: EngineOptions): Engine {
     mixAudio,
 
     async render(spec, hooks) {
-      const source = await openSource(entry, { comp: spec.comp, props: JSON.stringify(spec.props), bundleFile: bundleFile ?? undefined });
+      const source = await openSource(entry, { comp: spec.comp, props: JSON.stringify(spec.props), bundleFile: bundleFile ?? undefined, ...(publicDir === undefined ? {} : { publicDir }) });
       try {
         mkdirSync(dirname(spec.output), { recursive: true });
         const summary = await renderSource(source, new (native().Renderer)(), {
