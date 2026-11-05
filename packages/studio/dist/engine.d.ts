@@ -1,0 +1,167 @@
+import type { AudioClipJson } from '@kinetographdev/scene';
+import type { AudioMix } from './audio-mix.js';
+import type { CompositionInfo, InspectResult, LayerName, SequenceJson } from './protocol.js';
+export interface EngineOptions {
+    /** The project entry, absolute: a project file or a `.json` scene. */
+    entry: string;
+    /** The built bundle of the project; null for a `.json` scene. */
+    bundleFile: string | null;
+    /** Directory `staticFile()` reads from (default: `public/` beside the entry, else beside the nearest package.json). */
+    publicDir?: string;
+}
+/** One frame after the JS stage: what the preview, `inspect` and the timeline are made from. */
+export interface FrameScene {
+    /** The scene as the addon takes it. */
+    sceneJson: string;
+    frame: number;
+    /** Asset paths in the scene resolve against this. */
+    baseDir: string;
+    width: number;
+    height: number;
+    fps: number;
+    durationInFrames: number;
+    /** Every `<Sequence>` in the frame's tree (packages/cli/skills/kinetograph/references/AUTHORING.md §11.4). */
+    sequences: SequenceJson[];
+    /** Layer id to its name, component and source; absent for a `.json` scene. Sources are relative to the studio's cwd. */
+    names?: Record<string, LayerName>;
+    /** A `.json` scene: every frame is the same scene. */
+    constant: boolean;
+    /** The sounds this frame plays (as `kinetograph render` collects them); empty for a `.json` scene. */
+    audio: AudioClipJson[];
+    /** ms spent in the JS stage. */
+    jsMs: number;
+}
+export interface PreviewRequest {
+    scale: number;
+    format: 'jpeg' | 'png';
+}
+export interface PreviewResult {
+    width: number;
+    height: number;
+    mime: 'image/jpeg' | 'image/png';
+    data: Uint8Array;
+}
+export interface RenderSpec {
+    comp: string;
+    props: Record<string, unknown>;
+    /** Absolute. */
+    output: string;
+    /** Inclusive frames. */
+    range: [first: number, last: number];
+    encoder?: string;
+    draft?: boolean;
+}
+export interface RenderHooks {
+    /** After each frame is handed to the encoder. */
+    onFrame(done: number, total: number): void;
+    /** True once the job is to stop; the engine then throws an error with code `CANCELLED`. */
+    shouldCancel(): boolean;
+}
+export interface Engine {
+    /** The compositions the project registers. Throws when the project fails while loading. */
+    compositions(): Promise<CompositionInfo[]>;
+    /** The composition as it resolves with `props` (metadata calculated), and the frames `range` spells (default all). */
+    plan(request: {
+        comp: string;
+        props: Record<string, unknown>;
+        range?: string;
+    }): Promise<{
+        composition: CompositionInfo;
+        range: [number, number];
+    }>;
+    /** The JS stage for one frame. */
+    frame(request: {
+        comp: string;
+        props: Record<string, unknown>;
+        frame: number;
+    }): Promise<FrameScene>;
+    /** The GPU stage: the frame rendered, scaled and encoded. The only call that opens a GPU device. */
+    preview(scene: FrameScene, request: PreviewRequest): Promise<PreviewResult>;
+    inspect(scene: FrameScene): Promise<InspectResult>;
+    /** The mix of the sounds the frames of a sweep played; null when the composition has no sound. */
+    mixAudio(frames: {
+        frame: number;
+        audio: AudioClipJson[];
+    }[], info: {
+        fps: number;
+        durationInFrames: number;
+        baseDir: string;
+    }): Promise<AudioMix | null>;
+    /** A whole render job; resolves with the addon's `RenderSummary`. */
+    render(spec: RenderSpec, hooks: RenderHooks): Promise<Record<string, unknown>>;
+    dispose(): void;
+}
+/** What an engine module exports. */
+export type CreateEngine = (options: EngineOptions) => Engine | Promise<Engine>;
+/** What a worker is for: the roles differ in which calls the server makes, not in the code. */
+export type WorkerRole = 'project' | 'timeline' | 'render';
+/** What a worker thread is started with. */
+export interface WorkerInit {
+    role: WorkerRole;
+    /** Path of the engine module. */
+    engine: string;
+    options: EngineOptions;
+    /** A render worker: slot 0 becomes 1 when the job is to stop. */
+    cancel?: SharedArrayBuffer;
+}
+export type WorkerRequest = {
+    id: number;
+    op: 'compositions';
+} | {
+    id: number;
+    op: 'plan';
+    comp: string;
+    props: Record<string, unknown>;
+    range?: string;
+} | {
+    id: number;
+    op: 'preview';
+    comp: string;
+    props: Record<string, unknown>;
+    frame: number;
+    scale: number;
+    format: 'jpeg' | 'png';
+} | {
+    id: number;
+    op: 'inspect';
+    comp: string;
+    props: Record<string, unknown>;
+    frame: number;
+} | {
+    id: number;
+    op: 'timeline';
+    comp: string;
+    props: Record<string, unknown>;
+}
+/** After a `timeline` call: mixes the sound that sweep collected (no second pass over the frames). */
+ | {
+    id: number;
+    op: 'audio';
+} | {
+    id: number;
+    op: 'render';
+    spec: RenderSpec;
+};
+export type WorkerReply = {
+    id: number;
+    ok: true;
+    result: unknown;
+} | {
+    id: number;
+    ok: false;
+    error: {
+        code: string;
+        message: string;
+    };
+} | {
+    event: 'progress';
+    id: number;
+    done: number;
+    total: number;
+};
+/** What `preview` replies with: the image and the time the worker spent on it. */
+export interface PreviewReply extends PreviewResult {
+    /** JS stage + addon, ms. */
+    ms: number;
+}
+//# sourceMappingURL=engine.d.ts.map

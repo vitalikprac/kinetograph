@@ -1,36 +1,33 @@
 {
-  "name": "kinetograph",
+  "name": "@kinetographdev/studio",
   "version": "0.3.0-vitalik.1",
-  "description": "Agent CLI and MCP server for the Kinetograph video engine: renders Remotion projects, HTML pages and HyperFrames projects without a browser",
+  "description": "kinetograph studio: a local web server and browser UI whose preview frames the addon renders",
   "license": "PolyForm-Small-Business-1.0.0",
   "type": "module",
-  "bin": {
-    "kinetograph": "packages/cli/dist/cli.js"
-  },
   "exports": {
     ".": {
-      "types": "./packages/cli/dist/index.d.ts",
-      "default": "./packages/cli/dist/index.js"
+      "types": "./packages/studio/dist/index.d.ts",
+      "default": "./packages/studio/dist/index.js"
+    },
+    "./protocol": {
+      "types": "./packages/studio/dist/protocol.d.ts",
+      "default": "./packages/studio/dist/protocol.js"
     }
   },
   "files": [
-    "packages/cli/dist",
-    "packages/cli/skills",
-    "packages/cli/assets",
-    "packages/cli/package.json"
+    "packages/studio/dist",
+    "packages/studio/catalog",
+    "packages/studio/ui/dist",
+    "packages/studio/package.json"
   ],
   "dependencies": {
+    "@agentclientprotocol/sdk": "^2.0.2",
     "@kinetographdev/audio": "0.3.0",
-    "@kinetographdev/compat": "0.3.0",
     "@kinetographdev/core": "0.3.0",
     "@kinetographdev/native": "0.3.0",
     "@kinetographdev/scene": "0.3.0",
-    "@modelcontextprotocol/sdk": "1.32.1",
-    "esbuild": "0.28.2",
-    "parse5": "8.0.1",
-    "postcss": "8.5.30",
-    "typescript": "5.9.3",
-    "zod": "4.6.7"
+    "kinetograph": "github:vitalikprac/kinetograph#dist-cli",
+    "ws": "8.22.0"
   },
   "engines": {
     "node": ">=22"

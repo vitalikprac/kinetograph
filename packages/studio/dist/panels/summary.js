@@ -1,0 +1,95 @@
+// What the agent is told when a panel closes (docs/proposals/studio-panels.md, "How the answer reaches the agent"): one
+// line the skill describes, then the changes in short form. The whole answer is in plan/<kind>.json (plan/custom-<name>.json).
+import { takesAnswer } from './custom.js';
+import { planFileOf } from './placement.js';
+/** The longest detail sent; the plan file has the rest. */
+const DETAIL_MAX = 1500;
+const clip = (text, max = 160) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+/** `[panel storyboard p_3 dismissed]`; a custom panel is named by its slug: `[panel custom:end-card p_3 dismissed]`. */
+const tag = (panel, what) => {
+    const kind = panel.panel === 'custom' ? `custom:${panel.data.name}` : panel.panel;
+    return `[panel ${kind} ${panel.id} ${what}]`;
+};
+/** One block's value in a few words; the plan file has the whole of it. */
+function shortValue(block, value) {
+    switch (block.type) {
+        case 'choice':
+            return Array.isArray(value) ? (value.length > 0 ? value.join('+') : 'none') : value === null || value === undefined ? 'none' : String(value);
+        case 'slider':
+            return `${value}${block.unit ? ` ${block.unit}` : ''}`;
+        case 'input':
+            return JSON.stringify(clip(String(value), 60));
+        case 'list':
+            return plural(value.length, 'item');
+        case 'table':
+            return plural(value.length, 'row');
+        case 'notes':
+            return plural(value.length, 'note');
+        default:
+            return value === null || value === undefined ? 'none' : String(value);
+    }
+}
+/** `pick=b, speed=1.2 x, why="make it faster"`: each block that has a value, in the panel's order. */
+function describeCustom(draft, answer) {
+    const parts = draft.blocks.filter(takesAnswer).flatMap((b) => (b.id in answer.values ? [`${b.id}=${shortValue(b, answer.values[b.id])}`] : []));
+    return clip(parts.join(', ') || 'no values', 400);
+}
+/** The one-line summary of a submitted answer and the lines that follow it. */
+function describe(panel) {
+    switch (panel.panel) {
+        case 'brief': {
+            const a = panel.answer;
+            return {
+                line: `brief approved: ${a.platform} ${a.size.width}x${a.size.height} at ${a.size.fps} fps, ${a.seconds} s, ${plural(a.references.length, 'reference')}`,
+                detail: [`purpose: ${clip(a.purpose)}`, `audience: ${clip(a.audience)}`, `takeaway: ${clip(a.takeaway)}`, ...(a.notes ? [`notes: ${clip(a.notes)}`] : [])],
+            };
+        }
+        case 'script': {
+            const a = panel.answer;
+            return {
+                line: `${a.approved ? 'approved' : 'changes wanted:'} ${plural(a.lines.length, 'line')}, ${plural(a.notes.length, 'note')}`,
+                detail: a.notes.map((n) => `${n.line}: ${clip(n.text)}`),
+            };
+        }
+        case 'storyboard': {
+            const a = panel.answer;
+            const total = a.shots.length + a.removed.length;
+            const asked = panel.data.shots.map((s) => s.id).filter((id) => !a.removed.includes(id));
+            const order = a.shots.map((s) => s.id);
+            const reordered = order.length === asked.length && order.some((id, i) => id !== asked[i]);
+            return {
+                line: a.approved ? `approved ${a.shots.length} of ${total} shots` : `changes wanted: ${a.shots.length} of ${total} shots kept, not approved`,
+                detail: [
+                    ...(a.removed.length > 0 ? [`removed: ${a.removed.join(', ')}`] : []),
+                    ...(reordered ? [`order: ${order.join(', ')}`] : []),
+                    ...a.notes.map((n) => `${n.shot}: ${clip(n.text)}`),
+                ],
+            };
+        }
+        case 'styleframes': {
+            const a = panel.answer;
+            const chose = a.pick !== null ? `picked ${a.pick}` : a.mix ? `mixed: ${clip(a.mix, 80)}` : 'no pick';
+            return { line: `${a.approved ? 'approved' : 'changes wanted:'} ${chose}`, detail: a.notes.map((n) => `${n.frame}: ${clip(n.text)}`) };
+        }
+        case 'custom':
+            return { line: describeCustom(panel.data, panel.answer), detail: [] };
+        case 'review': {
+            const a = panel.answer;
+            const notes = [...a.notes].sort((x, y) => x.frame - y.frame);
+            return {
+                line: a.verdict === 'approved' ? `approved, ${plural(a.notes.length, 'note')}` : `changes wanted, ${plural(a.notes.length, 'note')}`,
+                detail: notes.map((n) => `frame ${n.frame}${n.layer ? ` (${n.layer})` : ''}: ${clip(n.text)}`),
+            };
+        }
+    }
+}
+/** The message for the agent when `panel` was submitted or dismissed. */
+export function closingMessage(panel) {
+    if (panel.status !== 'submitted' || panel.answer === null)
+        return tag(panel, 'dismissed');
+    const { line, detail } = describe(panel);
+    const body = detail.join('\n');
+    return `${tag(panel, 'submitted')} ${line}; see plan/${planFileOf(panel)}.json${body ? `\n${clip(body, DETAIL_MAX)}` : ''}`;
+}
+//# sourceMappingURL=summary.js.map
