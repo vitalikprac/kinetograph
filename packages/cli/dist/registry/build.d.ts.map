@@ -1,0 +1,1 @@
+{"version":3,"file":"build.d.ts","sourceRoot":"","sources":["../../src/registry/build.ts"],"names":[],"mappings":"AAOA,OAAO,EAQL,KAAK,YAAY,EAClB,MAAM,WAAW,CAAC;AASnB,MAAM,WAAW,WAAW;IAC1B,KAAK,EAAE,YAAY,EAAE,CAAC;IACtB,oDAAoD;IACpD,OAAO,EAAE,MAAM,EAAE,CAAC;CACnB;AAqGD,0DAA0D;AAC1D,wBAAgB,aAAa,CAAC,MAAM,EAAE,MAAM,EAAE,MAAM,EAAE,MAAM,GAAG,WAAW,CAwCzE"}

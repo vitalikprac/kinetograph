@@ -1,0 +1,126 @@
+// CSS of a HyperFrames page, rewritten for the engine: a mounted composition's rules are scoped to the composition
+// (HyperFrames scopes them the same way, so two compositions can both style `.title`), and Google Fonts imports become
+// font loads. The page's own rules are kept as written: its `html` and `body` are the document's.
+import postcss, {} from 'postcss';
+const escapeAttr = (value) => value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** `[data-composition-id="id"]`. */
+export const compositionSelector = (id) => `[data-composition-id="${escapeAttr(id)}"]`;
+const GLOBAL_AT_RULES = new Set(['keyframes', '-webkit-keyframes', 'font-face', 'property', 'counter-style']);
+function inGlobalAtRule(rule) {
+    for (let node = rule.parent; node; node = node.parent) {
+        if (node.type === 'atrule' && GLOBAL_AT_RULES.has(node.name.toLowerCase()))
+            return true;
+    }
+    return false;
+}
+/** A rule inside another rule (CSS nesting) already has its parent's scope. */
+function nestedInRule(rule) {
+    for (let node = rule.parent; node; node = node.parent)
+        if (node.type === 'rule')
+            return true;
+    return false;
+}
+function rewriteRules(css, selector) {
+    let root;
+    try {
+        root = postcss.parse(css);
+    }
+    catch {
+        return css;
+    }
+    root.walkRules((rule) => {
+        if (inGlobalAtRule(rule) || nestedInRule(rule))
+            return;
+        rule.selectors = rule.selectors.map(selector);
+    });
+    return root.toResult({ map: false }).css;
+}
+/**
+ * The rules of a mounted composition scoped to it. A selector that already names the composition's root stays; `html`,
+ * `body` and `:root` alone are the composition's own box; any other gets the composition's selector in front. Rules
+ * written for the root's id (`#root { … }`) apply to the host, which takes the root's place.
+ */
+export function scopeToComposition(css, compositionId, rootId) {
+    const scope = compositionSelector(compositionId);
+    const own = new RegExp(`\\[\\s*data-composition-id\\s*=\\s*(["'])${escapeRegExp(compositionId)}\\1\\s*\\]`, 'g');
+    // The timing attributes a root selector may carry (`[data-composition-id="x"][data-start="0"]`) are the host's too.
+    const timing = /\[\s*data-(?:start|duration)\s*=\s*(?:"[^"]*"|'[^']*')\s*\]/g;
+    const rootIdToken = rootId ? new RegExp(`#${escapeRegExp(rootId)}(?![\\w-])`, 'g') : null;
+    return rewriteRules(css, (selector) => {
+        const text = selector.trim();
+        if (text === '' || text === '*')
+            return selector;
+        if (/^(html|body|:root)$/i.test(text))
+            return scope;
+        let rewritten = text;
+        if (rootIdToken !== null)
+            rewritten = rewritten.replace(rootIdToken, scope);
+        own.lastIndex = 0;
+        if (own.test(rewritten))
+            return rewritten.replace(timing, '');
+        return `${scope} ${rewritten}`;
+    });
+}
+/**
+ * The families a Google Fonts CSS URL asks for, with their weights (`400`) and italic weights (`400i`):
+ * `css2?family=Name:ital,wght@0,400;1,700&family=Other:wght@300..500`, or the older `css?family=Name:400,700italic`.
+ */
+export function parseGoogleFontsUrl(url) {
+    let parsed;
+    try {
+        parsed = new URL(url, 'https://fonts.googleapis.com');
+    }
+    catch {
+        return [];
+    }
+    if (parsed.hostname !== 'fonts.googleapis.com')
+        return [];
+    const out = [];
+    for (const value of parsed.searchParams.getAll('family')) {
+        const colon = value.indexOf(':');
+        const family = (colon < 0 ? value : value.slice(0, colon)).replace(/\+/g, ' ').trim();
+        if (family === '')
+            continue;
+        const spec = colon < 0 ? '' : value.slice(colon + 1);
+        const variants = new Set();
+        const at = spec.indexOf('@');
+        if (at >= 0) {
+            const axes = spec.slice(0, at).split(',');
+            const italAt = axes.indexOf('ital');
+            const wghtAt = axes.indexOf('wght');
+            for (const tuple of spec.slice(at + 1).split(';')) {
+                const parts = tuple.split(',');
+                const italic = italAt >= 0 && parts[italAt] === '1';
+                const weight = wghtAt >= 0 ? parts[wghtAt] : '400';
+                const range = /^(\d+)\.\.(\d+)$/.exec(weight ?? '');
+                const weights = range
+                    ? Array.from({ length: Math.floor((Number(range[2]) - Number(range[1])) / 100) + 1 }, (_, i) => String(Number(range[1]) + i * 100))
+                    : [weight ?? '400'];
+                for (const w of weights)
+                    variants.add(italic ? `${w}i` : w);
+            }
+        }
+        else if (spec !== '') {
+            for (const item of spec.split(',')) {
+                const m = /^(\d+)?(italic)?$/.exec(item.trim());
+                if (m)
+                    variants.add(`${m[1] ?? '400'}${m[2] ? 'i' : ''}`);
+            }
+        }
+        if (variants.size === 0)
+            variants.add('400');
+        out.push({ family, variants: [...variants] });
+    }
+    return out;
+}
+/** `@import url(https://fonts.googleapis.com/…)` rules removed from the CSS, with the fonts they asked for. */
+export function extractGoogleFontImports(css) {
+    const fonts = [];
+    const rest = css.replace(/@import\s+(?:url\(\s*)?(['"]?)(https?:\/\/fonts\.googleapis\.com\/[^'")\s;]+)\1\s*\)?[^;]*;/gi, (_m, _q, url) => {
+        fonts.push(...parseGoogleFontsUrl(url.replace(/&amp;/g, '&')));
+        return '';
+    });
+    return { css: rest, fonts };
+}
+//# sourceMappingURL=css.js.map

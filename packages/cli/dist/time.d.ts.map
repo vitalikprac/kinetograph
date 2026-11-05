@@ -1,0 +1,1 @@
+{"version":3,"file":"time.d.ts","sourceRoot":"","sources":["../src/time.ts"],"names":[],"mappings":"AAIA,wBAAgB,KAAK,IAAI,MAAM,CAE9B;AAED,MAAM,WAAW,KAAK;IACpB,IAAI,EAAE,MAAM,CAAC;IACb,GAAG,EAAE,MAAM,CAAC;IACZ,GAAG,EAAE,MAAM,CAAC;CACb;AAED,wBAAgB,OAAO,CAAC,OAAO,EAAE,MAAM,EAAE,GAAG,KAAK,CAWhD"}

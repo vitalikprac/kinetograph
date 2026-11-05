@@ -1,0 +1,115 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { whole } from '../args.js';
+import { CliError } from '../errors.js';
+import { FrameDrawer } from '../frame-drawer.js';
+import { buildOnionScene, buildStripScene, stripLayout } from '../scenes.js';
+import { evenFrames, frameRange } from '../source.js';
+import { nowMs } from '../time.js';
+import { ENTRY, OUTPUT_OPTION, PREFERRED_EFFECT_BACKEND_OPTION, STRICT_OPTION, ensureParentDir, newRenderer, openFromArgs, outputPath, } from './types.js';
+const MAX_FRAMES = 64;
+/** Renders `frames` of the source to PNGs in a fresh temp directory, drawn by `drawer`. */
+async function renderFrames(frames, drawer) {
+    const dir = mkdtempSync(join(tmpdir(), 'kinetograph-sheet-'));
+    try {
+        const files = [];
+        for (const frame of frames) {
+            const file = `frame-${frame}.png`;
+            writeFileSync(join(dir, file), await drawer.png(frame));
+            files.push({ file, frame });
+        }
+        return { dir, files };
+    }
+    catch (error) {
+        rmSync(dir, { recursive: true, force: true });
+        throw error;
+    }
+}
+export const strip = {
+    name: 'strip',
+    summary: 'Contact sheet of evenly spaced frames, labelled with frame and time',
+    project: true,
+    positionals: [ENTRY],
+    options: [
+        { name: 'count', short: 'n', type: 'number', description: `Number of frames (default 12, at most ${MAX_FRAMES})` },
+        OUTPUT_OPTION,
+        { name: 'range', type: 'string', description: 'Frames to sample, as 10..40; default all' },
+        { name: 'cols', type: 'number', description: 'Columns of the sheet (default 4 for landscape, 6 for portrait)' },
+        STRICT_OPTION,
+        PREFERRED_EFFECT_BACKEND_OPTION,
+    ],
+    async run(args, context) {
+        const count = whole('-n', args.options.count, 1, 12);
+        if (count > MAX_FRAMES)
+            throw new CliError('INVALID_ARG', `-n is at most ${MAX_FRAMES}`);
+        const cols = args.options.cols === undefined ? undefined : whole('--cols', args.options.cols, 1);
+        const source = await openFromArgs(args);
+        const drawer = new FrameDrawer(source, { renderer: newRenderer, progress: context.progress, strict: args.options.strict === true });
+        const started = nowMs();
+        let dir;
+        try {
+            const output = outputPath(args, 'sheets', source.composition.id, (stem) => `${stem}-strip.png`);
+            const [first, last] = frameRange(args.options.range, source.composition.durationInFrames);
+            const frames = evenFrames(first, last, count);
+            const rendered = await renderFrames(frames, drawer);
+            dir = rendered.dir;
+            drawer.reportLeftOut();
+            const scene = buildStripScene(rendered.files, source.composition, cols);
+            ensureParentDir(output);
+            writeFileSync(output, newRenderer().still(JSON.stringify(scene), 0, dir));
+            const layout = stripLayout(frames.length, source.composition.width, source.composition.height, cols);
+            const ms = nowMs() - started;
+            return {
+                data: { output, width: scene.width, height: scene.height, frames, cols: layout.cols, rows: layout.rows, ms, compat: drawer.report() },
+                text: `wrote ${output} (${scene.width}x${scene.height}, frames ${frames.join(', ')}, ${ms.toFixed(0)} ms)`,
+            };
+        }
+        finally {
+            if (dir)
+                rmSync(dir, { recursive: true, force: true });
+            source.dispose();
+        }
+    },
+};
+export const onion = {
+    name: 'onion',
+    summary: 'Frames of a range blended over one another, to show a motion path',
+    project: true,
+    positionals: [ENTRY, { name: 'range', description: 'Frames to blend, as 10..40 (10 to 39) or 10..=40' }],
+    options: [
+        { name: 'count', short: 'n', type: 'number', description: `Number of frames (default 6, at most ${MAX_FRAMES})` },
+        OUTPUT_OPTION,
+        PREFERRED_EFFECT_BACKEND_OPTION,
+    ],
+    async run(args) {
+        const count = whole('-n', args.options.count, 1, 6);
+        if (count > MAX_FRAMES)
+            throw new CliError('INVALID_ARG', `-n is at most ${MAX_FRAMES}`);
+        const source = await openFromArgs(args);
+        const drawer = new FrameDrawer(source, { renderer: newRenderer });
+        const started = nowMs();
+        let dir;
+        try {
+            const output = outputPath(args, 'sheets', source.composition.id, (stem) => `${stem}-onion.png`);
+            const [first, last] = frameRange(String(args.positionals.range), source.composition.durationInFrames);
+            const frames = evenFrames(first, last, count);
+            const rendered = await renderFrames(frames, drawer);
+            dir = rendered.dir;
+            const scene = buildOnionScene(rendered.files, source.composition);
+            ensureParentDir(output);
+            writeFileSync(output, newRenderer().still(JSON.stringify(scene), 0, dir));
+            const ms = nowMs() - started;
+            return {
+                data: { output, width: scene.width, height: scene.height, frames, ms },
+                text: `wrote ${output} (${scene.width}x${scene.height}, frames ${frames.join(', ')}, ${ms.toFixed(0)} ms)`,
+            };
+        }
+        finally {
+            if (dir)
+                rmSync(dir, { recursive: true, force: true });
+            source.dispose();
+        }
+    },
+};
+//# sourceMappingURL=sheets.js.map

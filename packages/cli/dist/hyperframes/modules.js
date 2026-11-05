@@ -1,0 +1,390 @@
+// ES module scripts and import maps of a HyperFrames page. A browser loads `<script type="module">` and its imports from
+// the web; a render does not. Here the pre-download step (`prefetch.ts`) walks each module's import graph (bare names
+// through the page's import map, URLs, relative paths, `export * from`, dynamic `import("…")` of a string) and stores
+// every remote module in the cache, pinned in the lock file. A render then bundles each module script with esbuild, the
+// graph resolved through the same map from the cache alone, into a classic script that the runtime runs after the page's
+// classic scripts, in document order (a module script is deferred). The import map is the WHATWG one: `imports`, `scopes`,
+// longest key first, and a key ending in `/` as a prefix.
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { readFileSync, realpathSync } from 'node:fs';
+import { relative, resolve as resolvePath, isAbsolute } from 'node:path';
+import { build } from 'esbuild';
+import { CliError } from '../errors.js';
+import { fetchCdnData, finalUrlOf, resolveCdnData, verifyIntegrity } from './deps.js';
+export const emptyImportMap = () => ({ imports: {}, scopes: {} });
+const isUrlLike = (specifier) => /^(?:\/|\.\/|\.\.\/)/.test(specifier) || /^[a-z][a-z0-9+.-]*:/i.test(specifier);
+function parseUrl(text, base) {
+    try {
+        return base === undefined ? new URL(text) : new URL(text, base);
+    }
+    catch {
+        return null;
+    }
+}
+/** The specifier as a URL when it is `/x`, `./x`, `../x` or absolute; null for a bare name. */
+function asUrl(specifier, base) {
+    if (/^(?:\/|\.\/|\.\.\/)/.test(specifier))
+        return parseUrl(specifier, base);
+    return /^[a-z][a-z0-9+.-]*:/i.test(specifier) ? parseUrl(specifier) : null;
+}
+/** An import map's keys and values as absolute URLs where they are URLs; a value that is neither is dropped. */
+function normalizeSet(set, base, problems) {
+    const out = {};
+    if (typeof set !== 'object' || set === null || Array.isArray(set))
+        return out;
+    for (const [key, value] of Object.entries(set)) {
+        if (key === '')
+            continue;
+        if (typeof value !== 'string') {
+            problems.push(`the import map maps "${key}" to something that is not a string`);
+            continue;
+        }
+        const target = parseUrl(value, base);
+        if (target === null || (!isUrlLike(value) && !/^[a-z][a-z0-9+.-]*:/i.test(value))) {
+            problems.push(`the import map maps "${key}" to "${value}", which is not a URL or a path`);
+            continue;
+        }
+        if (key.endsWith('/') && !target.href.endsWith('/')) {
+            problems.push(`the import map maps the prefix "${key}" to "${value}", which does not end with a slash`);
+            continue;
+        }
+        const keyUrl = asUrl(key, base);
+        out[keyUrl === null ? key : keyUrl.href] = target.href;
+    }
+    return out;
+}
+/**
+ * Reads the text of a `<script type="importmap">` whose file is at `base` (a URL; relative values resolve from it).
+ * `problems` hears about the parts that were ignored.
+ */
+export function parseImportMap(text, base, problems = []) {
+    let json;
+    try {
+        json = JSON.parse(text);
+    }
+    catch (error) {
+        problems.push(`the import map is not valid JSON (${error instanceof Error ? error.message : String(error)})`);
+        return emptyImportMap();
+    }
+    const map = emptyImportMap();
+    const root = json;
+    map.imports = normalizeSet(root?.imports, base, problems);
+    if (typeof root?.scopes === 'object' && root.scopes !== null) {
+        for (const [prefix, set] of Object.entries(root.scopes)) {
+            const prefixUrl = parseUrl(prefix, base);
+            if (prefixUrl === null) {
+                problems.push(`the import map has a scope "${prefix}" that is not a URL`);
+                continue;
+            }
+            map.scopes[prefixUrl.href] = { ...(map.scopes[prefixUrl.href] ?? {}), ...normalizeSet(set, base, problems) };
+        }
+    }
+    return map;
+}
+/** Merges `extra` into `map`: a name already mapped keeps its first mapping (as in a browser, where a later map cannot override an earlier). */
+export function mergeImportMaps(map, extra) {
+    for (const [key, value] of Object.entries(extra.imports))
+        if (!(key in map.imports))
+            map.imports[key] = value;
+    for (const [scope, set] of Object.entries(extra.scopes)) {
+        const into = (map.scopes[scope] ??= {});
+        for (const [key, value] of Object.entries(set))
+            if (!(key in into))
+                into[key] = value;
+    }
+}
+/** The first mapping of `specifier` in one set: an exact key, else the longest `…/` key that prefixes it. */
+function matchSet(specifier, set) {
+    if (Object.hasOwn(set, specifier))
+        return set[specifier];
+    const prefixes = Object.keys(set)
+        .filter((key) => key.endsWith('/') && specifier.startsWith(key))
+        .sort((a, b) => b.length - a.length);
+    const key = prefixes[0];
+    return key === undefined ? null : set[key] + specifier.slice(key.length);
+}
+/**
+ * The URL `specifier` names when imported by the module at `referrer` (a URL): the matching scope first (the longest scope
+ * prefix that holds the referrer, then shorter ones), then the top-level `imports`, then the specifier as a URL. A bare name
+ * with no mapping is an error, as in a browser.
+ */
+export function resolveImport(specifier, referrer, map) {
+    const url = asUrl(specifier, referrer);
+    const key = url === null ? specifier : url.href;
+    const scopes = Object.keys(map.scopes)
+        .filter((scope) => scope === referrer || (scope.endsWith('/') && referrer.startsWith(scope)))
+        .sort((a, b) => b.length - a.length);
+    for (const scope of scopes) {
+        const hit = matchSet(key, map.scopes[scope]);
+        if (hit !== null)
+            return hit;
+    }
+    const hit = matchSet(key, map.imports);
+    if (hit !== null)
+        return hit;
+    if (url !== null)
+        return url.href;
+    throw new Error(`the bare specifier "${specifier}" is not in an import map (imported by ${referrer})`);
+}
+// ---- bundling ----
+const REMOTE = 'kinetograph-module-url';
+const GSAP = 'kinetograph-module-gsap';
+const INLINE = 'kinetograph-module-inline';
+const INLINE_ENTRY = 'kinetograph-module-inline:entry';
+/** `gsap` or a CDN URL of it: imported, it leaves its instance where the GSAP clock looks (`GSAP_REGISTRY` in core). */
+const GSAP_URL = /^\/(?:v\d+\/)?(?:npm\/)?gsap(?:@[^/]+)?(?:\/(?:all|index\.js|\+esm|es\d+\/gsap(?:\.bundle)?\.m?js))?$/;
+const isGsap = (specifier, url) => {
+    if (specifier === 'gsap' || specifier === 'gsap/all')
+        return true;
+    const parsed = parseUrl(url);
+    return parsed !== null && parsed.protocol === 'https:' && GSAP_URL.test(parsed.pathname);
+};
+/** `import.meta` of a module is its own URL, as a browser has it. */
+function withImportMeta(code, url) {
+    if (!code.includes('import.meta'))
+        return code;
+    const quoted = JSON.stringify(url);
+    return code.replace(/\bimport\.meta\.url\b/g, quoted).replace(/\bimport\.meta\b/g, `({ url: ${quoted} })`);
+}
+/**
+ * An `import(` whose argument is not a plain string: esbuild cannot bundle what is only known at run time, so the call is
+ * handed to the host (`dynamic.ts`) with the module's URL, which resolves the specifier from there. A string literal is
+ * bundled as before. Found by text, so an `import(` inside a string or comment is rewritten too, which does no harm.
+ */
+const COMPUTED_IMPORT = /(?<![.\w$])import\s*\(\s*(?!(?:'[^'\\\n]*'|"[^"\\\n]*"|`[^`$\\]*`)\s*[,)])/;
+export const DYNAMIC_IMPORT = Symbol.for('kinetograph.import');
+const hasComputedImport = (code) => COMPUTED_IMPORT.test(code);
+/** `code` as the bundle reads it: computed imports go to the host, `import.meta` is the module's URL. */
+function prepare(code, url, state) {
+    let out = code;
+    if (hasComputedImport(out)) {
+        state.computed = true;
+        const call = `(globalThis[Symbol.for('kinetograph.import')] ?? ((_from, specifier) => import(specifier)))(${JSON.stringify(url)}, `;
+        out = out.replace(new RegExp(COMPUTED_IMPORT.source, 'g'), () => call);
+    }
+    return withImportMeta(out, url);
+}
+const loaderFor = (url) => {
+    const path = parseUrl(url)?.pathname ?? url;
+    if (/\.json$/i.test(path))
+        return 'json';
+    if (/\.css$/i.test(path))
+        return 'empty';
+    return 'js';
+};
+/** Whether the file at `path` is inside `root` once symlinks are resolved. */
+function insideRoot(path, root) {
+    try {
+        const rel = relative(realpathSync(root), realpathSync(path));
+        return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+    }
+    catch {
+        // A file that is not there: the lexical position decides, and esbuild reports the missing file.
+        const rel = relative(resolvePath(root), resolvePath(path));
+        return !rel.startsWith('..') && !isAbsolute(rel);
+    }
+}
+function modulePlugin(state) {
+    return {
+        name: 'kinetograph-modules',
+        setup(b) {
+            b.onResolve({ filter: /.*/ }, (args) => {
+                if (args.kind === 'entry-point') {
+                    // The synthetic entry: the inline script, or the script's URL / file.
+                    if (args.path === INLINE_ENTRY)
+                        return { path: state.script.file, namespace: INLINE, sideEffects: true };
+                    if (/^https:/i.test(args.path))
+                        return { path: args.path, namespace: REMOTE, sideEffects: true };
+                    if (!insideRoot(args.path, state.script.root))
+                        return { errors: [{ text: `${args.path} is outside the project (${state.script.root}): it is not loaded` }] };
+                    return { path: args.path, sideEffects: true };
+                }
+                const referrer = args.namespace === REMOTE || args.namespace === GSAP ? finalUrlOf(args.importer) : args.namespace === INLINE ? state.script.base : pathToFileURL(args.importer).href;
+                let target;
+                try {
+                    target = resolveImport(args.path, referrer, state.map);
+                }
+                catch (error) {
+                    return { errors: [{ text: error instanceof Error ? error.message : String(error) }] };
+                }
+                if (!args.pluginData?.noShim && isGsap(args.path, target) && /^https:/i.test(target))
+                    return { path: target, namespace: GSAP };
+                const fromRemote = args.namespace === REMOTE || args.namespace === GSAP;
+                if (/^https:/i.test(target))
+                    return { path: target, namespace: REMOTE, sideEffects: true };
+                // A remote module imports https URLs only: it cannot pull a file of this machine into the bundle.
+                if (fromRemote)
+                    return { errors: [{ text: `${args.path} (imported by the remote module ${referrer}) resolves to ${target}: a remote module may only import https: URLs` }] };
+                if (/^file:/i.test(target)) {
+                    const file = fileURLToPath(target);
+                    if (!insideRoot(file, state.script.root))
+                        return { errors: [{ text: `${target} (imported by ${referrer}) is outside the project (${state.script.root}): it is not loaded` }] };
+                    return { path: file, sideEffects: true };
+                }
+                return { errors: [{ text: `${target} (imported by ${referrer}) is not an https: or file: URL: it is not loaded` }] };
+            });
+            const text = async (url) => {
+                let found = resolveCdnData(url);
+                if ('error' in found && state.fetch !== null) {
+                    const [result] = await fetchCdnData([url], state.fetch);
+                    if (result !== undefined)
+                        state.fetched.push(result);
+                    if (result?.status === 'failed')
+                        return { errors: [{ text: `${url}: ${result.error}` }] };
+                    found = resolveCdnData(url);
+                }
+                else if ('file' in found) {
+                    if (state.fetch !== null)
+                        state.fetched.push(...(await fetchCdnData([url], state.fetch)));
+                }
+                if ('error' in found) {
+                    state.missing.push(url);
+                    return { errors: [{ text: found.error }] };
+                }
+                return { text: readFileSync(found.file, 'utf8') };
+            };
+            b.onLoad({ filter: /.*/, namespace: INLINE }, () => ({ contents: prepare(state.script.code ?? '', state.script.base, state), loader: 'js' }));
+            b.onLoad({ filter: /.*/, namespace: REMOTE }, async (args) => {
+                const got = await text(args.path);
+                if ('errors' in got)
+                    return got;
+                if (args.path === state.script.file && state.script.integrity) {
+                    try {
+                        verifyIntegrity(Buffer.from(got.text), state.script.integrity, args.path);
+                    }
+                    catch (error) {
+                        state.integrityFailed = true;
+                        return { errors: [{ text: error instanceof Error ? error.message : String(error) }] };
+                    }
+                }
+                // A redirected download is based at where it ended, as in a browser: its relative imports and `import.meta.url`.
+                return { contents: prepare(got.text, finalUrlOf(args.path), state), loader: loaderFor(args.path), pluginData: { noShim: true } };
+            });
+            b.onLoad({ filter: /.*/, namespace: GSAP }, async (args) => {
+                // The module itself is read through the cache (and walked for its imports) like any other.
+                const from = JSON.stringify(args.path);
+                return {
+                    contents: [
+                        `import * as ns from ${from};`,
+                        `export * from ${from};`,
+                        `export { default } from ${from};`,
+                        `globalThis[Symbol.for('kinetograph.gsap')] = ns.gsap ?? ns.default?.gsap ?? ns.default;`,
+                    ].join('\n'),
+                    loader: 'js',
+                    pluginData: { noShim: true },
+                };
+            });
+            // A local module: `import.meta.url` is its file URL.
+            b.onLoad({ filter: /\.[cm]?[jt]s$/ }, (args) => {
+                const code = readFileSync(args.path, 'utf8');
+                if (!code.includes('import.meta') && !hasComputedImport(code))
+                    return undefined;
+                return { contents: prepare(code, pathToFileURL(args.path).href, state), loader: /\.[cm]?ts$/.test(args.path) ? 'ts' : 'js' };
+            });
+        },
+    };
+}
+const messageText = (m) => (m.location ? `${m.location.file}:${m.location.line}: ${m.text}` : m.text);
+async function bundle(state, format) {
+    const { script } = state;
+    const entry = script.code !== null ? INLINE_ENTRY : script.file;
+    const result = await build({
+        entryPoints: [entry],
+        bundle: true,
+        write: false,
+        format,
+        platform: 'browser',
+        target: 'es2022',
+        logLevel: 'silent',
+        metafile: true,
+        plugins: [modulePlugin(state)],
+    });
+    // Inputs of the local files (a remote module is `kinetograph-module-url:https://...`); paths are relative to the cwd.
+    for (const input of Object.keys(result.metafile.inputs))
+        if (!/^[a-z][a-z0-9-]*:/i.test(input) || /^[a-z]:[\\/]/i.test(input))
+            state.inputs.add(resolvePath(input));
+    return result.outputFiles[0].text;
+}
+/**
+ * The module `specifier` names, imported at run time by the module at `referrer` (a URL), as a script that leaves its
+ * namespace in `globalThis[slot]` when it has run (an async function: top-level `await` works). Reads the cache only, unless `fetch` is given, which downloads what is not there.
+ */
+export async function bundleDynamicImport(specifier, 
+/** The global symbol the bundle leaves the module's namespace in when it runs. */
+slot, referrer, root, map, fetch) {
+    const script = {
+        code: `import * as ns from ${JSON.stringify(specifier)};\nglobalThis[Symbol.for(${JSON.stringify(Symbol.keyFor(slot))})] = ns;\n`,
+        file: referrer,
+        base: referrer,
+        scope: null,
+        sourceFile: null,
+        root,
+    };
+    const state = { script, map, fetch, fetched: [], missing: [], integrityFailed: false, computed: false, inputs: new Set() };
+    try {
+        return { code: `(async () => {\n${await bundle(state, 'esm')}\n})();`, fetched: state.fetched, missing: state.missing };
+    }
+    catch (error) {
+        const errors = error.errors ?? [];
+        throw Object.assign(new Error(errors.length > 0 ? errors.map(messageText).join('\n') : error instanceof Error ? error.message : String(error)), { missing: state.missing, code: state.integrityFailed ? 'INTEGRITY_MISMATCH' : undefined });
+    }
+}
+/**
+ * `script` and everything it imports as one classic script. Top-level `await` makes the script an async function that the
+ * runtime does not wait for (it runs to its first `await` at once). The build reads the cache only, unless `fetch` is given
+ * (the pre-download step), which downloads what is not there.
+ */
+export async function bundleModuleScript(script, map, fetch = null) {
+    const state = { script, map, fetch, fetched: [], missing: [], integrityFailed: false, computed: false, inputs: new Set() };
+    const done = (code) => ({ code, fetched: state.fetched, computed: state.computed, inputs: [...state.inputs] });
+    try {
+        return done(await bundle(state, 'iife'));
+    }
+    catch (error) {
+        const errors = error.errors ?? [];
+        if (errors.some((e) => /top-level await/i.test(e.text))) {
+            try {
+                const esm = await bundle(state, 'esm');
+                return done(`(async () => {\n${esm}\n})();`);
+            }
+            catch (again) {
+                throw failure(script, state, again.errors ?? [], again);
+            }
+        }
+        throw failure(script, state, errors, error);
+    }
+}
+/** What a module that does not match the lock, or was redirected somewhere else than the lock pins, fails with. */
+const LOCK_MISMATCH_TEXT = /does not match kinetograph\.lock\.json|locked it at/;
+function failure(script, state, errors, fallback) {
+    const text = errors.length > 0 ? errors.map(messageText).join('\n') : fallback instanceof Error ? fallback.message : String(fallback);
+    const message = `${script.file}: the module script's imports could not be bundled:\n${text}`;
+    return new CliError(state.integrityFailed ? 'INTEGRITY_MISMATCH' : LOCK_MISMATCH_TEXT.test(text) ? 'LOCK_MISMATCH' : state.missing.length > 0 ? 'SCRIPT_NOT_AVAILABLE' : 'MODULE_BUNDLE_FAILED', message);
+}
+/**
+ * The pre-download step for module scripts: each one's import graph is walked (by bundling it) and every remote module is
+ * downloaded and locked. A script that cannot be bundled is a failed entry (its imports of the graph that were reached are
+ * kept); the render reports it.
+ */
+export async function fetchModuleGraph(modules, map, options, 
+/** Told what the graphs hold: the local files they read, and whether any has an `import()` of a computed specifier. */
+info = { inputs: new Set(), computed: false }) {
+    const results = [];
+    const seen = new Set();
+    for (const script of modules) {
+        try {
+            const { fetched, inputs, computed } = await bundleModuleScript(script, map, options);
+            for (const input of inputs)
+                info.inputs.add(input);
+            info.computed ||= computed;
+            for (const f of fetched)
+                if (!seen.has(f.url))
+                    (seen.add(f.url), results.push(f));
+        }
+        catch (error) {
+            results.push({ url: script.file, file: '', status: 'failed', error: error instanceof Error ? error.message : String(error), ...(error instanceof CliError ? { code: error.code } : {}) });
+        }
+    }
+    return results;
+}
+//# sourceMappingURL=modules.js.map

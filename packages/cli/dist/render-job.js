@@ -1,0 +1,166 @@
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { clampPcm, hasAudibleClip, hasOnFrame, joinClips, renderAudio } from '@kinetographdev/audio';
+import { resolveSoundSource } from '@kinetographdev/core/sound-source';
+import { CHUNK_FRAMES, renderInParallel } from './parallel-render.js';
+import { ProfileLog, now, profiling, stage, takeAddon, takeJs, writeShared } from './profile.js';
+import { LeftOutCollector, strictError } from './compat-report.js';
+import { CliError } from './errors.js';
+import { native } from './native.js';
+import { scaleScene, scaledSize } from './scenes.js';
+import { frameRange } from './source.js';
+/**
+ * Writes the `<Artifact>` files that frames `first..=last` asked for into the folder of `output`: text and bytes as they
+ * are, a thumbnail as the PNG of the frame it was rendered in.
+ */
+async function writeArtifacts(source, renderer, output, first, last, scale, records) {
+    const written = [];
+    const folder = dirname(output);
+    for (const artifact of records) {
+        if (artifact.frame < first || artifact.frame > last)
+            continue;
+        const file = join(folder, artifact.filename);
+        let data;
+        if (artifact.content === 'thumbnail') {
+            const out = await source.frame(artifact.frame);
+            const sceneJson = scale !== 1 ? JSON.stringify(scaleScene(JSON.parse(out.sceneJson), scale)) : out.sceneJson;
+            data = renderer.still(sceneJson, artifact.frame, source.baseDir);
+        }
+        else {
+            data = artifact.content;
+        }
+        mkdirSync(dirname(file), { recursive: true });
+        writeFileSync(file, data);
+        written.push(artifact.filename);
+    }
+    return written;
+}
+/**
+ * Renders `source` to `options.output` with `renderer` (the `render` command, packages/cli/skills/kinetograph/references/AUTHORING.md §9): a `.json` scene
+ * goes to the addon whole, a project is pushed frame by frame and its audio mixed at the end.
+ *
+ * Every frame goes to the addon. One that holds something the engine cannot draw is drawn without it, and the summary
+ * lists what was left out; with `strict` it fails the render instead.
+ */
+export async function renderSource(source, renderer, options) {
+    const { range, encoder } = options;
+    const scale = options.scale ?? (options.draft ? 0.5 : 1);
+    const { durationInFrames, fps, width, height } = source.composition;
+    const exported = { ...options.export, encoder: options.export?.encoder ?? encoder };
+    // Checked before anything is drawn: the codec against the path, the options against one another and this ffmpeg.
+    const plan = native().resolveExport(options.output, exported);
+    const step = options.everyNthFrame ?? 1;
+    // A JSON scene goes to the addon whole: it has keyframes and no audio. What it holds that the engine cannot draw
+    // (the glTF features a model uses that are not read) is the same on every frame.
+    if (source.kind === 'scene') {
+        let { sceneJson, unsupported = [] } = await source.frame(0);
+        const leftOut = new LeftOutCollector();
+        if (unsupported.length > 0) {
+            const [first, last] = frameRange(range, durationInFrames);
+            if (options.strict)
+                throw strictError(first, unsupported);
+            for (let frame = first; frame <= last; frame++)
+                leftOut.add(frame, unsupported);
+        }
+        if (step !== 1)
+            throw new CliError('INVALID_ARG', '--every-nth-frame needs a project; a .json scene is drawn whole');
+        if (scale !== 1)
+            sceneJson = JSON.stringify(scaleScene(JSON.parse(sceneJson), scale));
+        const summary = renderer.render(sceneJson, options.output, { range, encoder, export: exported, baseDir: source.baseDir });
+        return { ...summary, compat: leftOut.report(), artifacts: [] };
+    }
+    source.clearArtifacts?.();
+    const [first, last] = frameRange(range, durationInFrames);
+    const size = scale !== 1 ? { width: scaledSize(width, scale), height: scaledSize(height, scale) } : { width, height };
+    stage('beginVideo');
+    const writer = renderer.beginVideo(options.output, { width: size.width, height: size.height, fps, encoder, export: exported });
+    const clipFrames = [];
+    const leftOut = new LeftOutCollector();
+    let artifactRecords = [];
+    // Frames the workers did not draw because each was the same as the one before (the writer counts its own).
+    let parallelRepeats = 0;
+    try {
+        // The frames drawn: first, first + step, ... (step is 1 unless a GIF asks for fewer).
+        const total = Math.floor((last - first) / step) + 1;
+        const frameAt = (index) => first + index * step;
+        const workers = Math.min(options.concurrency ?? 1, Math.ceil(total / CHUNK_FRAMES));
+        const onFrame = (frame, audio, unsupported) => {
+            clipFrames.push({ frame, audio });
+            if (options.strict && unsupported.length > 0)
+                throw strictError(frame, unsupported);
+            leftOut.add(frame, unsupported);
+        };
+        const pushed = (index) => options.onFrame?.(index + 1, total);
+        if (workers > 1 && source.worker) {
+            // The workers number the frames drawn 0..total-1; `frameAt` says which frame of the composition each is.
+            artifactRecords = await renderInParallel({
+                spec: source.worker,
+                scale,
+                convertFormat: plan.convertFormat,
+                devReact: options.devReact ?? false,
+                preferredEffectBackend: options.preferredEffectBackend,
+                origin: first,
+                step,
+                workers,
+                count: total,
+                writer,
+                onFrame: (index, audio, unsupported, repeated) => {
+                    if (repeated)
+                        parallelRepeats += 1;
+                    onFrame(frameAt(index), audio, unsupported);
+                },
+                onPushed: pushed,
+                shouldCancel: options.shouldCancel,
+            });
+        }
+        else {
+            const log = profiling ? new ProfileLog(true) : undefined;
+            for (let index = 0; index < total; index++) {
+                if (options.shouldCancel?.())
+                    throw new CliError('CANCELLED', 'the render was cancelled');
+                const frame = frameAt(index);
+                const t0 = log ? now() : 0;
+                const out = await source.frame(frame);
+                const t1 = log ? now() : 0;
+                onFrame(frame, out.audio, out.unsupported ?? []);
+                const sceneJson = scale !== 1 ? JSON.stringify(scaleScene(JSON.parse(out.sceneJson), scale)) : out.sceneJson;
+                writer.pushFrame(sceneJson, frame, source.baseDir);
+                if (log) {
+                    const t2 = now();
+                    log.add({ f: frame, t0, t1, t2, js: out.jsMs, stringify: out.stringifyMs, push: t2 - t1, ...takeJs(), ...takeAddon() });
+                }
+                pushed(index);
+            }
+            log?.flush();
+            artifactRecords = source.artifacts?.() ?? [];
+        }
+        stage('frames pushed (loop end)');
+        const clips = joinClips(clipFrames);
+        let summary;
+        // A GIF has no sound. A render whose clips are all muted (or at volume 0) and with no onFrame callback has none either.
+        if (plan.audioCodec !== undefined && (hasAudibleClip(clips) || hasOnFrame(first, last))) {
+            options.progress?.('mixing audio');
+            stage('audio mix start');
+            const pcm = clampPcm(await renderAudio({ fps, first, last, clips, baseDir: source.baseDir, resolveSource: resolveSoundSource }));
+            stage('audio mix done');
+            summary = writer.finish(pcm);
+        }
+        else {
+            summary = writer.finish();
+        }
+        stage('writer.finish done');
+        writeShared();
+        const artifacts = await writeArtifacts(source, renderer, options.output, first, last, scale, artifactRecords);
+        return { ...summary, repeated: summary.repeated + parallelRepeats, compat: leftOut.report(), artifacts };
+    }
+    catch (error) {
+        try {
+            writer.abort();
+        }
+        catch {
+            // The writer may already be closed; the first error is the one to report.
+        }
+        throw error;
+    }
+}
+//# sourceMappingURL=render-job.js.map
