@@ -219,6 +219,16 @@ jobs:
       - name: Assemble the platform packages
         working-directory: crates/node
         run: |
+          # The fork builds darwin-arm64 + linux-x64-gnu only, but the committed
+          # napi config also lists Windows, which `napi artifacts` demands.
+          # Narrow the targets to what was built (CI checkout only, not committed).
+          node -e "
+            const fs = require('node:fs');
+            const j = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            j.napi.targets = j.napi.targets.filter((t) => t !== 'x86_64-pc-windows-msvc');
+            fs.writeFileSync('package.json', JSON.stringify(j, null, 2) + '\n');
+            console.log('napi targets:', j.napi.targets.join(', '));
+          "
           npx napi artifacts --output-dir artifacts
           for p in darwin-arm64 linux-x64-gnu; do
             a=artifacts/bindings-$p/npm/$p/bin
