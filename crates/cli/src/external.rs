@@ -649,7 +649,7 @@ fn encode_args(
         arg("-pix_fmt");
         arg(settings.pix.name());
     }
-    // The same tags the linked encoder puts on the stream (BT.709, limited range).
+    // The same tags the linked encoder puts on the stream (BT.709, full range).
     for s in [
         "-colorspace",
         "bt709",
@@ -658,7 +658,7 @@ fn encode_args(
         "-color_trc",
         "bt709",
         "-color_range",
-        "tv",
+        "pc",
         "-fps_mode",
         "cfr",
     ] {
@@ -667,8 +667,8 @@ fn encode_args(
     args
 }
 
-/// The filter that tags the raw pictures as the linked encoder does: BT.709, limited range.
-const BT709_TAGS: &str = "setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv";
+/// The filter that tags the raw pictures as the linked encoder does: BT.709, full range.
+const BT709_TAGS: &str = "setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=pc";
 
 /// A running ffmpeg taking raw pictures of one pixel format on its standard input and writing a video-only file.
 pub struct ExternalEncoder {
@@ -978,10 +978,10 @@ mod tests {
 
     const INPUT_8: &str = "-f rawvideo -pix_fmt yuv420p -s 1920x1080 -framerate 30/1 -i pipe:0 -an";
     const TAGS: &str =
-        "-colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv -fps_mode cfr";
+        "-colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range pc -fps_mode cfr";
 
     /// The tagging filter that starts every `-vf`, with the comma that joins it to the hardware plan's filter.
-    const SET: &str = "setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv,";
+    const SET: &str = "setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=pc,";
 
     #[test]
     fn untagged_pictures_are_declared_bt709_before_the_encoder_so_ffmpeg_converts_nothing() {

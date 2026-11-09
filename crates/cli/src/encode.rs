@@ -3,7 +3,7 @@
 //!
 //! Frames are converted to the output pixel format (`yuv420p` unless asked
 //! otherwise) by swscale with BT.709 coefficients and the stream is tagged
-//! BT.709, limited ("TV") range. The alpha channel is
+//! BT.709, full ("PC") range. The alpha channel is
 //! dropped, not composited, unless an alpha pixel format is asked for (`yuva444p10le` for ProRes 4444, `yuva420p` for
 //! VP9): a scene whose background is transparent shows its straight colours where it is clear (black, for the empty
 //! pixels the renderer writes). Give the scene an opaque `background` for video, or ask for alpha.
@@ -956,7 +956,7 @@ pub fn set_bt709(
     Ok(())
 }
 
-/// swscale's RGBA to `pix` conversion, BT.709 with full-range RGB in and limited-range YUV out.
+/// swscale's RGBA to `pix` conversion, BT.709 with full-range RGB in and full-range YUV out.
 ///
 /// The input is STRAIGHT (not premultiplied) alpha, and so is what the alpha formats hold: the compositor's readback
 /// (`fs_encode`) already un-premultiplies and sRGB-encodes, so partly transparent edges carry their own colour
@@ -978,7 +978,7 @@ fn rgba_scaler(width: u32, height: u32, pix: Pix) -> Result<scaling::Context, St
     )
     .map_err(|e| format!("cannot set up the RGBA to {} conversion: {e}", pix.name()))?;
     if pix.is_yuv() {
-        set_bt709(&mut scaler, true, false)?;
+        set_bt709(&mut scaler, true, true)?;
     }
     Ok(scaler)
 }
@@ -1255,7 +1255,7 @@ impl VideoEncoder {
         video.set_frame_rate(Some(Rational(fps_num, fps_den)));
         if settings.pix.is_yuv() {
             video.set_colorspace(color::Space::BT709);
-            video.set_color_range(color::Range::MPEG);
+            video.set_color_range(color::Range::JPEG);
             video.set_color_primaries(color::Primaries::BT709);
             video.set_color_transfer_characteristic(color::TransferCharacteristic::BT709);
         }
